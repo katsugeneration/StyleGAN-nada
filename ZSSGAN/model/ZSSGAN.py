@@ -3,6 +3,7 @@ import os
 sys.path.insert(0, os.path.abspath('../'))
 
 
+import math
 import torch
 import torchvision.transforms as transforms
 
@@ -325,7 +326,8 @@ class ZSSGAN(torch.nn.Module):
         sample_z = torch.randn(self.args.auto_layer_batch, z_dim, device=self.device)
 
         initial_w_codes = self.generator_frozen.style([sample_z])
-        initial_w_codes = initial_w_codes[0].unsqueeze(1).repeat(1, self.generator_frozen.generator.n_latent, 1)
+        if not self.args.sg3 or self.args.sgxl:
+          initial_w_codes = initial_w_codes[0].unsqueeze(1).repeat(1, self.generator_frozen.generator.n_latent, 1)
 
         w_codes = torch.Tensor(initial_w_codes.cpu().detach().numpy()).to(self.device)
 
@@ -334,8 +336,11 @@ class ZSSGAN(torch.nn.Module):
         w_optim = torch.optim.SGD([w_codes], lr=0.01)
 
         for _ in range(self.auto_layer_iters):
-            w_codes_for_gen = w_codes.unsqueeze(0)
-            generated_from_w = self.generator_trainable(w_codes_for_gen, input_is_latent=True)[0]
+            if self.args.sg3 or self.args.sgxl:
+              generated_from_w = self.generator_trainable(w_codes, input_is_latent=True)[0]
+            else:  
+              w_codes_for_gen = w_codes.unsqueeze(0)
+              generated_from_w = self.generator_trainable(w_codes_for_gen, input_is_latent=True)[0]
 
             w_loss = [self.clip_model_weights[model_name] * self.clip_loss_models[model_name].global_clip_loss(generated_from_w, self.target_class) for model_name in self.clip_model_weights.keys()]
             w_loss = torch.sum(torch.stack(w_loss))
@@ -345,16 +350,20 @@ class ZSSGAN(torch.nn.Module):
             w_optim.step()
         
         layer_weights = torch.abs(w_codes - initial_w_codes).mean(dim=-1).mean(dim=0)
+        
         chosen_layer_idx = torch.topk(layer_weights, self.auto_layer_k)[1].cpu().numpy()
 
         all_layers = list(self.generator_trainable.get_all_layers())
 
-        conv_layers = list(all_layers[4])
-        rgb_layers = list(all_layers[6]) # currently not optimized
+        if self.args.sgxl or self.args.sg3:
+          chosen_layers = all_layers
+        else:
+          conv_layers = list(all_layers[4])
+          rgb_layers = list(all_layers[6]) # currently not optimized
 
-        idx_to_layer = all_layers[2:4] + conv_layers # add initial convs to optimization
+          idx_to_layer = all_layers[2:4] + conv_layers # add initial convs to optimization
 
-        chosen_layers = [idx_to_layer[idx] for idx in chosen_layer_idx] 
+          chosen_layers = [idx_to_layer[idx] for idx in chosen_layer_idx] 
 
         # uncomment to add RGB layers to optimization.
 
